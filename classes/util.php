@@ -171,71 +171,179 @@ class util {
     final public static function mark_users_to_suspend() {
         global $DB;
         if (!(bool)config::get('enabled')) {
+            mtrace('Tool not enabled');
             return false;
         }
         if (!(bool)config::get('enablesmartdetect')) {
+            mtrace('Smart detect not enabled');
             return false;
         }
+        
         $lastrun = static::get_lastrun_config('smartdetect', 0, false);
         $deltatime = time() - $lastrun;
-        if ($deltatime < config::get('smartdetect_interval')) {
+        $interval = config::get('smartdetect_interval');
+        
+        // Always run if this is the first time or if the interval has passed
+        if ($lastrun == 0 || $deltatime >= $interval) {
+            mtrace('Executing suspension check...');
+            list($where, $params) = static::get_suspension_query(true);
+            $sql = "SELECT * FROM {user} u WHERE $where";
+            
+            $users = $DB->get_records_sql($sql, $params);
+            $usercount = count($users);
+            mtrace("Found $usercount users to suspend");
+            
+            if ($usercount > 0) {
+                foreach ($users as $user) {
+                    mtrace("Processing user {$user->id}: {$user->username}");
+                    // Suspend user here.
+                    $result = static::do_suspend_user($user);
+                    if (!$result) {
+                        mtrace("User {$user->id} was not suspended - may be admin or already suspended");
+                    }
+                }
+                return true;
+            } else {
+                mtrace('No users found to suspend');
+                return false;
+            }
+        } else {
+            mtrace('Skipping execution - interval not reached');
             return false;
         }
-        list($where, $params) = static::get_suspension_query(true);
-        $sql = "SELECT * FROM {user} u WHERE $where";
-        $users = $DB->get_records_sql($sql, $params);
-        foreach ($users as $user) {
-            // Suspend user here.
-            static::do_suspend_user($user);
-        }
-        return true;
     }
 
     /**
-     * Warns inactive users that they will be suspended soon. This must be run *AFTER* user suspension is done,
-     * or it will email suspended users if this is the first run.
+     * Warns inactive users that they will be suspended soon.
      */
     final public static function warn_users_of_suspension() {
-        global $DB;
+        global $DB, $CFG;
 
         if (!(bool)config::get('enabled')) {
+            mtrace('Tool not enabled');
             return false;
         }
         if (!(bool)config::get('enablesmartdetect')) {
+            mtrace('Smart detect not enabled');
             return false;
         }
         if (!(bool)config::get('enablesmartdetect_warning')) {
+            mtrace('Warning not enabled');
             return false;
         }
-        // Run in parallel with the suspensions.
+        
         $lastrun = static::get_lastrun_config('smartdetect', 0, false);
         $deltatime = time() - $lastrun;
-        if ($deltatime < config::get('smartdetect_interval')) {
-            return false;
-        }
-
-        // Do nothing if warningtime is 0.
-        $warningtime = (int)config::get('smartdetect_warninginterval');
-        if ($warningtime <= 0) {
-            return false;
-        }
-
-        // Get the query for users to warn.
-        $warningthreshold = (time() - (int)config::get('smartdetect_suspendafter')) + $warningtime;
-        list($where, $params) = static::get_suspension_query(true, $warningthreshold);
-        $sql = "SELECT * FROM {user} u WHERE $where";
-        $users = $DB->get_records_sql($sql, $params);
-        foreach ($users as $user) {
-            // Check whether the user was already warned.
-            if ((get_user_preferences('tool_usersuspension_warned', false, $user))) {
-                continue;
+        $interval = config::get('smartdetect_interval');
+        
+        // Always run if this is the first time or if the interval has passed
+        if ($lastrun == 0 || $deltatime >= $interval) {
+            // Do nothing if warningtime is 0.
+            $warningtime = (int)config::get('smartdetect_warninginterval');
+            if ($warningtime <= 0) {
+                mtrace('Warning interval is 0, skipping warnings');
+                return false;
             }
 
-            static::process_user_warning_email($user);
-            // Mark the user as warned. This will be reset on their first successful login post warning.
-            set_user_preference('tool_usersuspension_warned', true, $user);
+            $suspendafter = (int)config::get('smartdetect_suspendafter');
+            $currenttime = time();
+            
+            // Find users who are approaching suspension but not yet suspended
+            // Users who have been inactive for:
+            // MORE than (suspend_threshold - warning_time)
+            // BUT LESS than suspend_threshold
+            $warningStart = $currenttime - $suspendafter + $warningtime;  // When users enter warning period
+            $suspensionPoint = $currenttime - $suspendafter;              // When users would get suspended
+            
+            // Build query to find users in the warning window
+            $uniqid = static::get_prefix();
+            $where = "u.confirmed = 1 AND u.suspended = 0 AND u.deleted = 0 AND u.mnethostid = :{$uniqid}mnethost ";
+            $params = [
+                "{$uniqid}mnethost" => $CFG->mnet_localhost_id,
+            ];
+            
+            // For users with lastaccess timestamp
+            $where .= " AND (";
+            $where .= "(u.lastaccess > 0 AND u.lastaccess <= :{$uniqid}warningstart AND u.lastaccess > :{$uniqid}suspensionpoint)";
+            
+            // For users with only firstaccess
+            $where .= " OR (u.lastaccess = 0 AND u.firstaccess > 0 AND u.firstaccess <= :{$uniqid}warningstart2 AND u.firstaccess > :{$uniqid}suspensionpoint2)";
+            
+            // For manual auth users with no access
+            $where .= " OR (u.auth = 'manual' AND u.firstaccess = 0 AND u.lastaccess = 0 AND u.timemodified > 0 ";
+            $where .= " AND u.timemodified <= :{$uniqid}warningstart3 AND u.timemodified > :{$uniqid}suspensionpoint3)";
+            $where .= ")";
+            
+            $params["{$uniqid}warningstart"] = $warningStart;
+            $params["{$uniqid}suspensionpoint"] = $suspensionPoint;
+            $params["{$uniqid}warningstart2"] = $warningStart;
+            $params["{$uniqid}suspensionpoint2"] = $suspensionPoint;
+            $params["{$uniqid}warningstart3"] = $warningStart;
+            $params["{$uniqid}suspensionpoint3"] = $suspensionPoint;
+            
+            // Exclude users who should be excluded
+            static::append_user_exclusion($where, $params, 'u.');
+            
+            $sql = "SELECT * FROM {user} u WHERE $where";
+            
+            $users = $DB->get_records_sql($sql, $params);
+            $usercount = count($users);
+            mtrace("Found $usercount users to warn");
+            
+            $warnedusers = 0;
+            foreach ($users as $user) {
+                // Check whether the user was already warned.
+                if ((get_user_preferences('tool_usersuspension_warned', false, $user))) {
+                    mtrace("User {$user->id} already warned, skipping");
+                    continue;
+                }
+
+                mtrace("Sending warning to user {$user->id}: {$user->username}");
+                $result = static::process_user_warning_email($user);
+                if ($result) {
+                    mtrace("Warning email sent to user {$user->id}");
+                    $warnedusers++;
+                    // Mark the user as warned. This will be reset on their first successful login post warning.
+                    set_user_preference('tool_usersuspension_warned', true, $user);
+                } else {
+                    mtrace("Failed to send warning email to user {$user->id}");
+                }
+            }
+            
+            return $warnedusers > 0;
+        } else {
+            mtrace('Skipping warning execution - interval not reached');
+            return false;
         }
-        return true;
+    }
+
+    /**
+     * Gets last run configuration for a specific type
+     *
+     * @param string $type
+     * @param mixed $default default value to return if this config is not set
+     * @param bool $autosetnew if true, automatically insert current time for the last run configuration
+     */
+    final protected static function get_lastrun_config($type, $default = null, $autosetnew = true) {
+        $value = get_config('tool_usersuspension', $type . '_lastrun');
+        if ($value === false) {
+            $value = $default;
+        }
+        if ($autosetnew) {
+            static::set_lastrun_config($type);
+        }
+        return $value;
+    }
+
+    /**
+     * Sets last run configuration for a specific type
+     *
+     * @param string $type
+     * @param int $time Optional timestamp to set (defaults to current time)
+     */
+    final public static function set_lastrun_config($type, $time = null) {
+        $timevalue = ($time === null) ? time() : $time;
+        set_config($type . '_lastrun', $timevalue, 'tool_usersuspension');
     }
 
     /**
@@ -263,30 +371,6 @@ class util {
             // Delete user here.
             static::do_delete_user($user);
         }
-    }
-
-    /**
-     * Gets last run configuration for a specific type
-     *
-     * @param string $type
-     * @param mixed $default default value to return if this config is not set
-     * @param bool $autosetnew if true, automatically insert current time for the last run configuration
-     */
-    final protected static function get_lastrun_config($type, $default = null, $autosetnew = true) {
-        $value = get_config('tool_usersuspension', $type . '_lastrun');
-        if ($autosetnew) {
-            static::set_lastrun_config($type);
-        }
-        return (($value === false) ? $default : $value);
-    }
-
-    /**
-     * Sets last run configuration for a specific type
-     *
-     * @param string $type
-     */
-    final public static function set_lastrun_config($type) {
-        set_config($type . '_lastrun', time(), 'tool_usersuspension');
     }
 
     /**

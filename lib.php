@@ -27,7 +27,7 @@
  * Execute/inject code before sending HTTP headers.
  */
 function tool_usersuspension_before_http_headers() {
-    global $SESSION;
+    global $SESSION, $USER;
 
     if (!isloggedin() || isguestuser()) {
         return;
@@ -37,6 +37,8 @@ function tool_usersuspension_before_http_headers() {
         return;
     }
 
+    // If the user has been warned about suspension but has now logged in,
+    // clear the warning flag as they are now active
     if (get_user_preferences('tool_usersuspension_warned', false)) {
         unset_user_preference('tool_usersuspension_warned');
     }

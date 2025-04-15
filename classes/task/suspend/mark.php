@@ -64,13 +64,31 @@ class mark extends \core\task\scheduled_task {
             mtrace(get_string('config:smartdetect:disabled', 'tool_usersuspension'));
             return;
         }
+        
+        mtrace('User suspension task starting...');
+        
+        // Ensure task runs without checking intervals
+        \tool_usersuspension\util::set_lastrun_config('smartdetect', 0);
+        
         $result = false;
-        $result = $result || \tool_usersuspension\util::mark_users_to_suspend();
-        // Now email any users in the warning period.
-        $result = $result || \tool_usersuspension\util::warn_users_of_suspension();
+        
+        // First, email any users in the warning period.
+        mtrace('Looking for users to warn...');
+        $warningresult = \tool_usersuspension\util::warn_users_of_suspension();
+        mtrace('Warning result: ' . ($warningresult ? 'warnings sent' : 'no warnings sent'));
+        
+        // Then suspend users who have reached the threshold.
+        mtrace('Looking for users to suspend...');
+        $suspendresult = \tool_usersuspension\util::mark_users_to_suspend();
+        mtrace('Suspension result: ' . ($suspendresult ? 'users suspended' : 'no users suspended'));
+        
+        $result = $warningresult || $suspendresult;
 
         if ($result) {
             \tool_usersuspension\util::set_lastrun_config('smartdetect');
+            mtrace('Task completed with actions taken');
+        } else {
+            mtrace('Task completed with no actions taken');
         }
     }
 

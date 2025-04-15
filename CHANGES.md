@@ -1,3 +1,20 @@
+Version 4.0.21 (custom Lern.link GmbH build 2024090200)
+  Here's a summary of the changes made to fix the warning emails and suspension functionality:
+* /classes/task/suspend/mark.php
+  Reorganized task execution order: warnings first, then suspensions
+  Forced task to run by resetting lastrun time
+* /classes/util.php
+  Fixed warning email logic by properly calculating warning periods
+  Corrected time window calculations for warnings
+  Fixed SQL query for warning detection
+  Improved user detection in warning period
+  Added proper time threshold calculations
+  Made warning period work before suspension instead of after
+* /lib.php
+  Added proper warning flag reset on user login
+
+----------
+
 Version 4.0.2 (build 2024090100)
 * integrated changes from https://github.com/sebsoftnl/moodle-tool_usersuspension/pull/7
   Thanks, Gemma (https://github.com/gemguardian)
@@ -5,6 +22,8 @@ Version 4.0.2 (build 2024090100)
   Thanks Nejc / AttackVectorDelta
 * integrated changes from https://github.com/sebsoftnl/moodle-tool_usersuspension/pull/13
   Thanks Melvyn Gómez (https://github.com/melvyng)
+
+----------
 
 Version 4.0.1 (build 2022090102)
 * Fix for set_config from projectbadger: Fixes lastrun config and smart detection.
